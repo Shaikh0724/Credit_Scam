@@ -1,0 +1,4 @@
+venv/
+outputs/
+saved_models/
+data/
