@@ -973,7 +973,6 @@ elif page == "🧪 Train Your Model":
         if st.button("🚀 Train Models", use_container_width=True, type="primary"):
             with st.spinner("Preprocessing data..."):
                 df = raw_df.copy()
-
                 # Encode target if non-numeric
                 le = None
                 if not np.issubdtype(np.dtype(df[target_col].dtype), np.number):
