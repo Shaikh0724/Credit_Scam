@@ -11,7 +11,7 @@ import hashlib
 import base64
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-from sklearn.preprocessing import RobustScaler
+from sklearn.preprocessing import RobustScaler, LabelEncoder
 from src.models import CardShieldLSTM
 from src.evaluate import assign_card_risk_tier
 
@@ -110,14 +110,12 @@ USERS_FILE = "users.json"
 HASH_ITERATIONS = 260000  # OWASP-recommended for PBKDF2-SHA256
 
 def hash_pw(pw, salt=None):
-    """Hash password with PBKDF2-HMAC-SHA256 and a random 32-byte salt."""
     if salt is None:
         salt = os.urandom(32)
     dk = hashlib.pbkdf2_hmac('sha256', pw.encode(), salt, HASH_ITERATIONS)
     return salt.hex() + ":" + dk.hex()
 
 def verify_pw(pw, stored_hash):
-    """Verify password. Supports legacy SHA-256 hashes for transparent migration."""
     if ":" in stored_hash:
         salt_hex, hash_hex = stored_hash.split(":", 1)
         salt = bytes.fromhex(salt_hex)
@@ -130,7 +128,6 @@ def load_users():
     if os.path.exists(USERS_FILE):
         with open(USERS_FILE, "r") as f:
             return json.load(f)
-    # Default users
     defaults = {
         "admin@cardshield.ai": {"password": hash_pw("admin123"), "name": "Admin"},
         "danish@cardshield.ai": {"password": hash_pw("cardshield"), "name": "Danish"},
@@ -167,7 +164,6 @@ if not st.session_state.authenticated:
 
     left_col, right_col = st.columns([1, 1], gap="large")
 
-    # ── LEFT: Hero Section ──
     with left_col:
         st.markdown(f"""
         <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:80vh;padding:1rem;">
@@ -195,13 +191,11 @@ if not st.session_state.authenticated:
         </div>
         """, unsafe_allow_html=True)
 
-    # ── RIGHT: Auth Form ──
     with right_col:
         st.markdown('<div style="min-height:10vh;"></div>', unsafe_allow_html=True)
         st.markdown('<div class="login-right-card">', unsafe_allow_html=True)
 
         if st.session_state.auth_page == "login":
-            # ── SIGN IN ──
             st.markdown('<div class="login-form-title">Welcome Back</div>', unsafe_allow_html=True)
             st.markdown('<div class="login-form-sub">Sign in to continue to <b>CardShield AI</b></div>', unsafe_allow_html=True)
 
@@ -215,7 +209,6 @@ if not st.session_state.authenticated:
 
             if login_btn:
                 if email in users and verify_pw(password, users[email]["password"]):
-                    # Silently migrate legacy SHA-256 hash to salted PBKDF2
                     if ":" not in users[email]["password"]:
                         users[email]["password"] = hash_pw(password)
                         save_users(users)
@@ -226,9 +219,6 @@ if not st.session_state.authenticated:
                 else:
                     st.markdown('<div class="login-error">⚠️ Invalid email or password. Access denied.</div>', unsafe_allow_html=True)
 
-
-
-            # Switch to Sign Up
             switch_col1, switch_col2 = st.columns([3, 1])
             with switch_col1:
                 st.markdown('<div class="login-switch" style="text-align:left;margin-top:1rem;">Don\'t have an account?</div>', unsafe_allow_html=True)
@@ -238,7 +228,6 @@ if not st.session_state.authenticated:
                     st.rerun()
 
         else:
-            # ── SIGN UP ──
             st.markdown('<div class="login-form-title">Create Account</div>', unsafe_allow_html=True)
             st.markdown('<div class="login-form-sub">Join <b>CardShield AI</b> fraud detection platform</div>', unsafe_allow_html=True)
 
@@ -268,8 +257,6 @@ if not st.session_state.authenticated:
                     st.session_state.auth_page = "login"
                     st.rerun()
 
-
-
             switch_col1, switch_col2 = st.columns([3, 1])
             with switch_col1:
                 st.markdown('<div class="login-switch" style="text-align:left;margin-top:1rem;">Already have an account?</div>', unsafe_allow_html=True)
@@ -278,7 +265,6 @@ if not st.session_state.authenticated:
                     st.session_state.auth_page = "login"
                     st.rerun()
 
-        # Footer badges
         st.markdown("""
         <div class="login-badge-row">
             <div class="login-badge">🔒 Secure</div>
@@ -291,7 +277,7 @@ if not st.session_state.authenticated:
     st.stop()
 
 # ──────────────────────────────────────────────
-# CONSTANTS
+# CONSTANTS & UTILS
 # ──────────────────────────────────────────────
 FEATURE_COLS = [f"V{i}" for i in range(1, 29)] + ["scaled_amount", "scaled_time"]
 PLOTLY_LAYOUT = dict(
@@ -299,6 +285,47 @@ PLOTLY_LAYOUT = dict(
     font=dict(family="Inter", color="#e0e0e0"),
     margin=dict(l=40, r=40, t=50, b=40),
 )
+
+def preprocess_custom_csv(input_df, amt_scaler=None, time_scaler=None):
+    """
+    Dynamically aligns ANY custom credit card / fraud CSV file (whether standard PCA features 
+    or custom user features like Risk_Score, Merchant_Category, etc.) to 30 model features.
+    """
+    df_proc = input_df.copy()
+
+    # 1. Label encode string / object columns
+    for col in df_proc.select_dtypes(include=['object', 'category']).columns:
+        le = LabelEncoder()
+        df_proc[col] = le.fit_transform(df_proc[col].astype(str))
+
+    # Drop target columns if present
+    for target_candidate in ["Class", "class", "Fraud", "fraud", "is_fraud", "isFraud", "TARGET", "target", "Label", "label"]:
+        if target_candidate in df_proc.columns:
+            df_proc.drop(columns=[target_candidate], inplace=True, errors='ignore')
+
+    # 2. Scale Amount and Time if present
+    if "scaled_amount" not in df_proc.columns:
+        if "Amount" in df_proc.columns and amt_scaler is not None:
+            df_proc["scaled_amount"] = amt_scaler.transform(df_proc[["Amount"]])
+        else:
+            df_proc["scaled_amount"] = 0.0
+
+    if "scaled_time" not in df_proc.columns:
+        if "Time" in df_proc.columns and time_scaler is not None:
+            df_proc["scaled_time"] = time_scaler.transform(df_proc[["Time"]])
+        else:
+            df_proc["scaled_time"] = 0.0
+
+    # 3. Handle missing V1-V28 or custom columns
+    for col in FEATURE_COLS:
+        if col not in df_proc.columns:
+            df_proc[col] = 0.0
+
+    # Fill NaNs with median
+    if df_proc[FEATURE_COLS].isnull().sum().sum() > 0:
+        df_proc[FEATURE_COLS] = df_proc[FEATURE_COLS].fillna(df_proc[FEATURE_COLS].median())
+
+    return df_proc[FEATURE_COLS].values
 
 # ──────────────────────────────────────────────
 # CACHED LOADERS
@@ -335,7 +362,6 @@ def load_scalers():
 # PREDICTION HELPERS
 # ──────────────────────────────────────────────
 def predict_single(models, features):
-    """features: np array shape (30,)"""
     results = {}
     for name, mdl in models.items():
         if name == "LSTM":
@@ -466,7 +492,6 @@ elif page == "🔍 Real-Time Scan":
         st.error("Scalers not found. Place `creditcard.csv` in `data/` and restart.")
         st.stop()
 
-    # ── Model Selector ──
     st.markdown('<div class="glass-card">', unsafe_allow_html=True)
     sel_col1, sel_col2 = st.columns([1, 1])
     with sel_col1:
@@ -500,7 +525,6 @@ elif page == "🔍 Real-Time Scan":
         scaled_time = time_scaler.transform([[time_val]])[0][0]
         features = np.array(v_features + [scaled_amt, scaled_time], dtype=np.float32)
 
-        # Decide which models to run
         if selected_model == "🔀 All Models (Ensemble)":
             run_models = models
         else:
@@ -512,7 +536,6 @@ elif page == "🔍 Real-Time Scan":
         st.markdown("---")
 
         if selected_model == "🔀 All Models (Ensemble)":
-            # ── ENSEMBLE MODE ──
             st.markdown("### 🎯 Ensemble Scan Results")
             avg_prob = np.mean([r["prob"] for r in results.values()])
             ensemble_tier = assign_card_risk_tier(avg_prob)
@@ -540,7 +563,6 @@ elif page == "🔍 Real-Time Scan":
                     st.markdown(f"Risk: {risk_tag(r['tier'])}", unsafe_allow_html=True)
                     st.markdown("</div>", unsafe_allow_html=True)
 
-            # Comparison chart
             fig = go.Figure()
             names = list(results.keys())
             probs_list = [results[n]["prob"] * 100 for n in names]
@@ -551,7 +573,6 @@ elif page == "🔍 Real-Time Scan":
             st.plotly_chart(fig, use_container_width=True)
 
         else:
-            # ── SINGLE MODEL MODE ──
             r = results[selected_model]
             st.markdown(f"### 🎯 {selected_model} — Scan Result")
 
@@ -575,9 +596,8 @@ elif page == "🔍 Real-Time Scan":
 # ──────────────────────────────────────────────
 elif page == "📁 Batch Analysis":
     st.markdown("## 📁 Batch Data Analysis & Fraud Detection")
-    st.markdown('<p style="color:#8b949e;">Upload any credit-type CSV — get full analysis, interactive graphs, and fraud predictions (if format matches).</p>', unsafe_allow_html=True)
+    st.markdown('<p style="color:#8b949e;">Upload any credit-type CSV — get full analysis, interactive graphs, and fraud predictions.</p>', unsafe_allow_html=True)
 
-    # Model selector for this page
     st.markdown('<div class="glass-card">', unsafe_allow_html=True)
     ba_c1, ba_c2 = st.columns([1, 1])
     with ba_c1:
@@ -590,8 +610,7 @@ elif page == "📁 Batch Analysis":
     with ba_c2:
         st.markdown("""
         **Accepted Formats:**
-        - Any CSV with numeric data → Full EDA
-        - `Time, V1-V28, Amount` → EDA + Fraud Prediction
+        - Any CSV file → Universal EDA & Fraud Predictions Supported!
         """)
     st.markdown('</div>', unsafe_allow_html=True)
 
@@ -600,7 +619,6 @@ elif page == "📁 Batch Analysis":
     if uploaded:
         df = pd.read_csv(uploaded)
 
-        # ── DATA OVERVIEW ──
         st.markdown("---")
         st.markdown("### 📋 Data Overview")
         ov1, ov2, ov3, ov4 = st.columns(4)
@@ -613,14 +631,12 @@ elif page == "📁 Batch Analysis":
         st.markdown("#### 🔎 Data Preview")
         st.dataframe(df.head(20), use_container_width=True, height=300)
 
-        # ── STATISTICAL SUMMARY ──
         st.markdown("---")
         st.markdown("### 📊 Statistical Summary")
         num_df = df.select_dtypes(include=np.number)
         if not num_df.empty:
             st.dataframe(num_df.describe().round(3), use_container_width=True)
 
-        # ── MISSING VALUES ──
         missing = df.isnull().sum()
         missing = missing[missing > 0]
         if len(missing) > 0:
@@ -633,14 +649,11 @@ elif page == "📁 Batch Analysis":
             fig.update_layout(title="Missing Values Per Column", yaxis_title="Count", **PLOTLY_LAYOUT, height=350)
             st.plotly_chart(fig, use_container_width=True)
 
-        # ── DISTRIBUTION CHARTS ──
         if not num_df.empty:
             st.markdown("---")
             st.markdown("### 📈 Column Distributions")
             dist_cols = list(num_df.columns)
-            # Show up to 8 most interesting columns
             if len(dist_cols) > 8:
-                # Prioritize by variance
                 variances = num_df.var().sort_values(ascending=False)
                 dist_cols = list(variances.index[:8])
 
@@ -667,11 +680,10 @@ elif page == "📁 Batch Analysis":
                         )
                         st.plotly_chart(fig, use_container_width=True)
 
-        # ── BOX PLOTS (Outlier Detection) ──
         if not num_df.empty and len(num_df.columns) <= 30:
             st.markdown("---")
             st.markdown("### 📦 Box Plots — Outlier Detection")
-            box_cols = list(num_df.columns[:12])  # limit to 12 for readability
+            box_cols = list(num_df.columns[:12])
             fig = go.Figure()
             colors = ["#00f0ff", "#ff007f", "#00ff88", "#ffcc00", "#a855f7", "#f97316",
                        "#06b6d4", "#ec4899", "#22c55e", "#eab308", "#8b5cf6", "#fb923c"]
@@ -683,7 +695,6 @@ elif page == "📁 Batch Analysis":
             fig.update_layout(title="Feature Distributions", **PLOTLY_LAYOUT, height=420, showlegend=False)
             st.plotly_chart(fig, use_container_width=True)
 
-        # ── CORRELATION HEATMAP ──
         if not num_df.empty and 2 <= len(num_df.columns) <= 40:
             st.markdown("---")
             st.markdown("### 🔥 Correlation Heatmap")
@@ -698,8 +709,7 @@ elif page == "📁 Batch Analysis":
                               height=max(400, len(corr.columns) * 28))
             st.plotly_chart(fig, use_container_width=True)
 
-        # ── TARGET / CLASS DISTRIBUTION ──
-        # Auto-detect target column
+        # Target Column Detection
         target_col = None
         for candidate in ["Class", "class", "TARGET", "target", "Label", "label", "Fraud", "fraud", "is_fraud", "isFraud", "default", "Default"]:
             if candidate in df.columns:
@@ -714,7 +724,7 @@ elif page == "📁 Batch Analysis":
                 val_counts = df[target_col].value_counts()
                 fig = go.Figure(go.Pie(
                     labels=[str(v) for v in val_counts.index], values=val_counts.values,
-                    marker_colors=["#00ff88", "#ff007f"] + ["#ffcc00", "#a855f7"][:len(val_counts)-2],
+                    marker_colors=["#00ff88", "#ff007f"] + ["#ffcc00", "#a855f7"][:max(0, len(val_counts)-2)],
                     hole=0.5, textfont=dict(color="#e0e0e0"),
                 ))
                 fig.update_layout(title=f"{target_col} Distribution", **PLOTLY_LAYOUT, height=350)
@@ -734,47 +744,35 @@ elif page == "📁 Batch Analysis":
                 st.markdown('</div>', unsafe_allow_html=True)
 
         # ──────────────────────────────────────
-        # FRAUD PREDICTION (if format matches)
+        # FRAUD PREDICTION (Universal Execution)
         # ──────────────────────────────────────
-        has_raw = "Amount" in df.columns and "Time" in df.columns
-        has_v_cols = all(f"V{i}" in df.columns for i in range(1, 29))
-        has_preprocessed = all(c in df.columns for c in FEATURE_COLS)
-        can_predict = models and model_choice and (has_preprocessed or (has_raw and has_v_cols and amt_scaler))
-
-        if can_predict:
+        if models and model_choice:
             st.markdown("---")
             st.markdown("### 🛡️ Fraud Prediction Results")
             chosen_model = model_choice
 
-            has_class = "Class" in df.columns
+            has_class = target_col is not None
+            if has_class:
+                y_true_raw = df[target_col].values
+                if not pd.api.types.is_numeric_dtype(df[target_col]):
+                    y_true = LabelEncoder().fit_transform(y_true_raw.astype(str))
+                else:
+                    y_true = y_true_raw.astype(int)
 
-            if has_raw and has_v_cols and amt_scaler:
-                with st.spinner(f"Running predictions with {chosen_model}..."):
-                    df_proc = df.copy()
-                    df_proc["scaled_amount"] = amt_scaler.transform(df_proc[["Amount"]])
-                    df_proc["scaled_time"] = time_scaler.transform(df_proc[["Time"]])
-                    df_proc.drop(["Time", "Amount"], axis=1, inplace=True, errors="ignore")
-                    if has_class:
-                        y_true = df_proc["Class"].values
-                        df_proc.drop("Class", axis=1, inplace=True, errors="ignore")
-                    X = df_proc.values
-            else:
-                with st.spinner(f"Running predictions with {chosen_model}..."):
-                    X = df[FEATURE_COLS].values
-                    has_class = False
+            with st.spinner(f"Preprocessing & running predictions with {chosen_model}..."):
+                X = preprocess_custom_csv(df, amt_scaler=amt_scaler, time_scaler=time_scaler)
 
-            # Run predictions — ensemble or single
-            if chosen_model == "🔀 All Models (Ensemble)":
-                all_probs = {}
-                for mname, mdl in models.items():
-                    if mname == "LSTM":
-                        with torch.no_grad():
-                            all_probs[mname] = np.atleast_1d(mdl(torch.FloatTensor(X.reshape(X.shape[0], 1, X.shape[1]))).numpy())
-                    else:
-                        all_probs[mname] = mdl.predict_proba(X)[:, 1]
-                probs = np.mean(list(all_probs.values()), axis=0)
-            else:
-                probs, _, _ = predict_batch(models, X, chosen_model)
+                if chosen_model == "🔀 All Models (Ensemble)":
+                    all_probs = {}
+                    for mname, mdl in models.items():
+                        if mname == "LSTM":
+                            with torch.no_grad():
+                                all_probs[mname] = np.atleast_1d(mdl(torch.FloatTensor(X.reshape(X.shape[0], 1, X.shape[1]))).numpy())
+                        else:
+                            all_probs[mname] = mdl.predict_proba(X)[:, 1]
+                    probs = np.mean(list(all_probs.values()), axis=0)
+                else:
+                    probs, _, _ = predict_batch(models, X, chosen_model)
 
             preds = (probs >= 0.5).astype(int)
             tiers = [assign_card_risk_tier(p) for p in probs]
@@ -786,9 +784,8 @@ elif page == "📁 Batch Analysis":
                 "Risk_Tier": tiers,
             })
             if has_class:
-                result_df["Actual"] = y_true.astype(int)
+                result_df["Actual"] = y_true
 
-            # Summary metrics
             rc1, rc2, rc3, rc4 = st.columns(4)
             rc1.metric("Total Scanned", len(result_df))
             rc2.metric("Flagged Fraud", int(result_df["Prediction"].sum()))
@@ -799,7 +796,6 @@ elif page == "📁 Batch Analysis":
             else:
                 rc4.metric("Avg Prob", f"{probs.mean()*100:.2f}%")
 
-            # Prediction charts
             pr1, pr2 = st.columns(2)
             with pr1:
                 tier_counts = result_df["Risk_Tier"].value_counts()
@@ -817,18 +813,11 @@ elif page == "📁 Batch Analysis":
                 fig.update_layout(title="Fraud Probability Distribution", xaxis_title="Probability", yaxis_title="Count", **PLOTLY_LAYOUT, height=350)
                 st.plotly_chart(fig, use_container_width=True)
 
-            # Results table
             st.markdown("#### 📋 Prediction Details")
             st.dataframe(result_df, use_container_width=True, height=400)
 
             csv_out = result_df.to_csv(index=False)
             st.download_button("📥 Download Predictions CSV", csv_out, "cardshield_results.csv", "text/csv", use_container_width=True)
-
-        elif models:
-            st.markdown("---")
-            st.markdown('<div class="glass-card">', unsafe_allow_html=True)
-            st.info("ℹ️ **Prediction not available** — This CSV doesn't match the fraud model format (`Time, V1-V28, Amount`). Full EDA is shown above.")
-            st.markdown('</div>', unsafe_allow_html=True)
 
 # ──────────────────────────────────────────────
 # PAGE: MODEL ANALYTICS
@@ -857,7 +846,6 @@ elif page == "📊 Model Analytics":
         with tab:
             st.image(os.path.join(output_dir, fname), caption=title, use_container_width=True)
 
-    # Feature importance from RF
     if "Random Forest" in models:
         st.markdown("---")
         st.markdown("### 🌲 Random Forest Feature Importance")
@@ -888,14 +876,12 @@ elif page == "🧪 Train Your Model":
     st.markdown("## 🧪 Train Your Own Model")
     st.markdown('<p style="color:#8b949e;">Upload any credit-card-type CSV. We\'ll auto-detect the target, train RF + XGBoost, and give you full results — no coding required.</p>', unsafe_allow_html=True)
 
-    # ── Upload ──
     train_file = st.file_uploader("📂 Drop your CSV here", type=["csv"], key="train_upload")
 
     if train_file:
         raw_df = pd.read_csv(train_file)
         st.markdown("---")
 
-        # ── Quick Data Preview ──
         st.markdown("### 📋 Data Preview")
         pv1, pv2, pv3, pv4 = st.columns(4)
         pv1.metric("Rows", f"{raw_df.shape[0]:,}")
@@ -905,21 +891,18 @@ elif page == "🧪 Train Your Model":
         pv4.metric("Missing %", f"{missing_pct:.1f}%")
         st.dataframe(raw_df.head(10), use_container_width=True, height=280)
 
-        # ── Target Column Selection ──
         st.markdown("---")
         st.markdown("### 🎯 Select Target Column")
         st.markdown('<p style="color:#8b949e;">Choose the column your model should predict (e.g. Class, Fraud, Default).</p>', unsafe_allow_html=True)
 
-        # Auto-detect candidates
         target_candidates = []
         for col in raw_df.columns:
             nunique = raw_df[col].nunique()
             if nunique == 2:
-                target_candidates.insert(0, col)  # binary cols first
+                target_candidates.insert(0, col)
             elif 2 < nunique <= 10:
                 target_candidates.append(col)
 
-        # Also check by common names
         common_names = ["Class", "class", "TARGET", "target", "Label", "label",
                         "Fraud", "fraud", "is_fraud", "isFraud", "default",
                         "Default", "default.payment.next.month", "SeriousDlqin2yrs"]
@@ -934,7 +917,6 @@ elif page == "🧪 Train Your Model":
         target_col = st.selectbox("Target column", all_cols, index=default_idx,
                                   help="The column containing the label (0/1, Yes/No, etc.)")
 
-        # Show target distribution
         tc1, tc2 = st.columns([1, 2])
         with tc1:
             val_counts = raw_df[target_col].value_counts()
@@ -956,7 +938,6 @@ elif page == "🧪 Train Your Model":
             fig.update_layout(title=f"{target_col} Distribution", **PLOTLY_LAYOUT, height=280)
             st.plotly_chart(fig, use_container_width=True)
 
-        # ── Training Config ──
         st.markdown("---")
         st.markdown("### ⚙️ Training Configuration")
         cfg1, cfg2, cfg3 = st.columns(3)
@@ -973,17 +954,19 @@ elif page == "🧪 Train Your Model":
         if st.button("🚀 Train Models", use_container_width=True, type="primary"):
             with st.spinner("Preprocessing data..."):
                 df = raw_df.copy()
-                # Encode target if non-numeric
+                
+                # Encode target if non-numeric (Safe pandas dtype check)
                 le = None
-                if not np.issubdtype(np.dtype(df[target_col].dtype), np.number):
-                    st.error("Target column Should be numeric (0/1). Non-numeric targets will be label-encoded.")
-                    le = LabelEncoder()
-                    df[target_col] = le.fit_transform(df[target_col])
+                if target_col in df.columns:
+                    if not pd.api.types.is_numeric_dtype(df[target_col]):
+                        st.info("Target column is non-numeric. Label encoding applied automatically.")
+                        le = LabelEncoder()
+                        df[target_col] = le.fit_transform(df[target_col].astype(str))
 
                 y = df[target_col].values
                 X_df = df.drop(columns=[target_col])
 
-                # Drop non-numeric columns
+                # Drop non-numeric columns from features
                 non_num = X_df.select_dtypes(exclude=np.number).columns.tolist()
                 if non_num:
                     st.info(f"Dropped non-numeric columns: {', '.join(non_num)}")
@@ -996,16 +979,16 @@ elif page == "🧪 Train Your Model":
 
                 feature_names = list(X_df.columns)
 
-                # Scale
+                # Scale features
                 scaler = RobustScaler()
                 X_scaled = scaler.fit_transform(X_df)
 
-                # Split
+                # Train / Test Split
                 X_train, X_test, y_train, y_test = train_test_split(
                     X_scaled, y, test_size=test_size, stratify=y, random_state=42
                 )
 
-                # SMOTE
+                # Apply SMOTE if enabled
                 if use_smote:
                     try:
                         from imblearn.over_sampling import SMOTE
@@ -1039,7 +1022,7 @@ elif page == "🧪 Train Your Model":
                 xgb_preds = xgb.predict(X_test)
 
             # ══════════════════════════════════════
-            #  RESULTS
+            # RESULTS
             # ══════════════════════════════════════
             st.markdown("---")
             st.markdown("## 🏆 Training Results")
@@ -1047,14 +1030,12 @@ elif page == "🧪 Train Your Model":
             rf_rep = classification_report(y_test, rf_preds, output_dict=True)
             xgb_rep = classification_report(y_test, xgb_preds, output_dict=True)
 
-            # ── Accuracy Cards ──
             mc1, mc2, mc3, mc4 = st.columns(4)
             mc1.metric("RF Accuracy", f"{rf_rep['accuracy']*100:.2f}%")
             mc2.metric("RF F1 (fraud)", f"{rf_rep.get('1', rf_rep.get('1.0', {})).get('f1-score', 0)*100:.2f}%")
             mc3.metric("XGB Accuracy", f"{xgb_rep['accuracy']*100:.2f}%")
             mc4.metric("XGB F1 (fraud)", f"{xgb_rep.get('1', xgb_rep.get('1.0', {})).get('f1-score', 0)*100:.2f}%")
 
-            # ── Confusion Matrices ──
             st.markdown("### 🔢 Confusion Matrices")
             cm1, cm2 = st.columns(2)
             for col_widget, preds, name, color in [
@@ -1072,7 +1053,6 @@ elif page == "🧪 Train Your Model":
                     fig.update_layout(title=f"{name} Confusion Matrix", **PLOTLY_LAYOUT, height=320)
                     st.plotly_chart(fig, use_container_width=True)
 
-            # ── ROC-AUC Curves ──
             st.markdown("### 📈 ROC-AUC Curves")
             try:
                 rf_auc = roc_auc_score(y_test, rf_probs)
@@ -1093,7 +1073,6 @@ elif page == "🧪 Train Your Model":
             except Exception:
                 st.warning("ROC-AUC could not be computed (target may not be binary).")
 
-            # ── Precision-Recall Curve ──
             st.markdown("### 🎯 Precision-Recall Curves")
             try:
                 rf_ap = average_precision_score(y_test, rf_probs)
@@ -1112,7 +1091,6 @@ elif page == "🧪 Train Your Model":
             except Exception:
                 st.warning("Precision-Recall curve could not be computed.")
 
-            # ── Feature Importance ──
             st.markdown("### 🌲 Feature Importance (Top 15)")
             fi1, fi2 = st.columns(2)
             for col_widget, model_obj, name, color in [
@@ -1132,7 +1110,6 @@ elif page == "🧪 Train Your Model":
                                       **PLOTLY_LAYOUT, height=420)
                     st.plotly_chart(fig, use_container_width=True)
 
-            # ── Probability Distribution ──
             st.markdown("### 📊 Prediction Probability Distribution")
             pd1, pd2 = st.columns(2)
             for col_widget, probs_arr, name, color in [
@@ -1147,7 +1124,6 @@ elif page == "🧪 Train Your Model":
                                       **PLOTLY_LAYOUT, height=320)
                     st.plotly_chart(fig, use_container_width=True)
 
-            # ── Detailed Classification Report ──
             st.markdown("### 📝 Classification Report")
             rep1, rep2 = st.columns(2)
             with rep1:
@@ -1159,11 +1135,9 @@ elif page == "🧪 Train Your Model":
                 xgb_report_df = pd.DataFrame(classification_report(y_test, xgb_preds, output_dict=True)).T
                 st.dataframe(xgb_report_df.round(4), use_container_width=True)
 
-            # ── Per-Row Predictions Download ──
             st.markdown("---")
             st.markdown("### 📥 Download Full Predictions")
 
-            # Build ensemble prediction
             ens_probs = (rf_probs + xgb_probs) / 2
             ens_preds = (ens_probs >= 0.5).astype(int)
             ens_tiers = [assign_card_risk_tier(p) for p in ens_probs]
@@ -1180,7 +1154,6 @@ elif page == "🧪 Train Your Model":
                 "Risk_Tier": ens_tiers,
             })
 
-            # Summary row
             sr1, sr2, sr3, sr4 = st.columns(4)
             sr1.metric("Total Test Rows", f"{len(result_df):,}")
             sr2.metric("Ensemble Fraud", int(ens_preds.sum()))
@@ -1196,3 +1169,4 @@ elif page == "🧪 Train Your Model":
                 "trained_model_predictions.csv", "text/csv",
                 use_container_width=True,
             )
+            
