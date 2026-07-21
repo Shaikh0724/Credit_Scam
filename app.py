@@ -976,7 +976,8 @@ elif page == "🧪 Train Your Model":
 
                 # Encode target if non-numeric
                 le = None
-                if not np.issubdtype(df[target_col].dtype, np.number):
+                if not np.issubdtype(np.dtype(df[target_col].dtype), np.number):
+                    st.error("Target column Should be numeric (0/1). Non-numeric targets will be label-encoded.")
                     le = LabelEncoder()
                     df[target_col] = le.fit_transform(df[target_col])
 
