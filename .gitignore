@@ -2,3 +2,7 @@ venv/
 outputs/
 saved_models/
 data/
+users.json
+__pycache__/
+*.pyc
+.streamlit/secrets.toml

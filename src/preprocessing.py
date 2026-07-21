@@ -15,9 +15,12 @@ def load_and_preprocess_card_data(file_path):
     print(df['Class'].value_counts())
     print("\nExecuting preprocessing pipeline...")
     
-    scaler = RobustScaler()
-    df['scaled_amount'] = scaler.fit_transform(df['Amount'].values.reshape(-1, 1))
-    df['scaled_time'] = scaler.fit_transform(df['Time'].values.reshape(-1, 1))
+    # FIX: Use separate RobustScaler instances for Amount and Time
+    # Previously a single scaler was reused, causing Amount's fitted state to be overwritten
+    amount_scaler = RobustScaler()
+    time_scaler = RobustScaler()
+    df['scaled_amount'] = amount_scaler.fit_transform(df['Amount'].values.reshape(-1, 1))
+    df['scaled_time'] = time_scaler.fit_transform(df['Time'].values.reshape(-1, 1))
     df.drop(['Time', 'Amount'], axis=1, inplace=True)
     
     X = df.drop('Class', axis=1).values
@@ -34,5 +37,5 @@ def load_and_preprocess_card_data(file_path):
     X_train_seq = np.reshape(X_train_res, (X_train_res.shape[0], 1, X_train_res.shape[1]))
     X_test_seq = np.reshape(X_test, (X_test.shape[0], 1, X_test.shape[1]))
     
-    # Return statement ko simplified 6 variables par set kar diya hai
-    return X_train_seq, X_test_seq, X_train_res, X_test, y_train_res, y_test
+    # Return scalers alongside data so they can be persisted for inference consistency
+    return X_train_seq, X_test_seq, X_train_res, X_test, y_train_res, y_test, amount_scaler, time_scaler
